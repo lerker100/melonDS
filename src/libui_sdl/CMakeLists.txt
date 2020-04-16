@@ -1,7 +1,5 @@
 project(libui_sdl)
 
-enable_language(RC)
-
 SET(SOURCES_LIBUI
 	main.cpp
 	Platform.cpp
