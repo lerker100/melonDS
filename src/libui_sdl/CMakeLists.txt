@@ -1,5 +1,7 @@
 project(libui_sdl)
 
+enable_language(RC)
+
 SET(SOURCES_LIBUI
 	main.cpp
 	Platform.cpp
@@ -13,10 +15,6 @@ SET(SOURCES_LIBUI
 	DlgWifiSettings.cpp
 	OSD.cpp
 )
-
-if (WIN32)
-	set(CMAKE_RC_COMPILE_OBJECT "<CMAKE_RC_COMPILER> -i <SOURCE> -o <OBJECT>")
-endif()
 
 option(BUILD_SHARED_LIBS "Whether to build libui as a shared library or a static library" ON)
 set(BUILD_SHARED_LIBS OFF)
