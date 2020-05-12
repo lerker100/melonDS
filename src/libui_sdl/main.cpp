@@ -20,6 +20,7 @@
 #include <time.h>
 #include <stdio.h>
 #include <string.h>
+#include <string>
 
 #ifndef __WIN32__
 #include <glib.h>
@@ -905,8 +906,6 @@ void UpdateFPSLimit(void* data)
 
 int EmuThreadFunc(void* burp)
 {
-    NDS::Init();
-
     MainScreenPos[0] = 0;
     MainScreenPos[1] = 0;
     MainScreenPos[2] = 0;
@@ -2952,6 +2951,8 @@ int main(int argc, char** argv)
     JoystickID = Config::JoystickID;
     Joystick = NULL;
     OpenJoystick();
+
+    NDS::Init();
 
     EmuRunning = 2;
     RunningSomething = false;
