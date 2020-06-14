@@ -98,6 +98,8 @@ typedef struct
 
 } MemRegion;
 
+extern int CurCPU;
+
 extern u8 ARM9MemTimings[0x40000][4];
 extern u8 ARM7MemTimings[0x20000][4];
 
@@ -120,17 +122,17 @@ extern u8 ROMSeed1[2*8];
 extern u8 ARM9BIOS[0x1000];
 extern u8 ARM7BIOS[0x4000];
 
-extern u8 SharedWRAM[0x8000];
-extern u8* SWRAM_ARM9;
-extern u8* SWRAM_ARM7;
-extern u32 SWRAM_ARM9Mask;
-extern u32 SWRAM_ARM7Mask;
+const u32 SharedWRAMSize = 0x8000;
+extern u8* SharedWRAM;
 
-extern u8 ARM7WRAM[0x10000];
+extern MemRegion SWRAM_ARM9;
+extern MemRegion SWRAM_ARM7;
 
-#define MAIN_RAM_SIZE 0x400000
+const u32 ARM7WRAMSize = 0x10000;
+extern u8* ARM7WRAM;
 
-extern u8 MainRAM[MAIN_RAM_SIZE];
+const u32 MainRAMSize = 0x400000;
+extern u8* MainRAM;
 
 bool Init();
 void DeInit();

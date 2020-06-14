@@ -33,6 +33,7 @@
 #include "AREngine.h"
 #include "Platform.h"
 #include "ARMJIT.h"
+#include "ARMJIT_Memory.h"
 
 
 namespace NDS
@@ -89,16 +90,16 @@ u32 CPUStop;
 u8 ARM9BIOS[0x1000];
 u8 ARM7BIOS[0x4000];
 
-u8 MainRAM[MAIN_RAM_SIZE];
+u8* MainRAM;
 
-u8 SharedWRAM[0x8000];
+u8* SharedWRAM;
 u8 WRAMCnt;
-u8* SWRAM_ARM9;
-u8* SWRAM_ARM7;
-u32 SWRAM_ARM9Mask;
-u32 SWRAM_ARM7Mask;
 
-u8 ARM7WRAM[0x10000];
+// putting them together so they're always next to each other
+MemRegion SWRAM_ARM9;
+MemRegion SWRAM_ARM7;
+
+u8* ARM7WRAM;
 
 u16 ExMemCnt[2];
 
@@ -164,6 +165,10 @@ bool Init()
 
 #ifdef JIT_ENABLED
     ARMJIT::Init();
+#else
+    MainRAM = new u8[MainRAMSize];
+    ARM7WRAM = new u8[ARM7WRAMSize];
+    SharedWRAM = new u8[SharedWRAMSize];
 #endif
 
     DMAs[0] = new DMA(0, 0);
@@ -460,6 +465,10 @@ void Reset()
         printf("ARM7 BIOS loaded\n");
         fclose(f);
     }
+    
+#ifdef JIT_ENABLED
+    ARMJIT::Reset();
+#endif
 
     // has to be called before InitTimings
     // otherwise some PU settings are completely
@@ -475,7 +484,7 @@ void Reset()
 
     InitTimings();
 
-    memset(MainRAM, 0, MAIN_RAM_SIZE);
+    memset(MainRAM, 0, MainRAMSize);
     memset(SharedWRAM, 0, 0x8000);
     memset(ARM7WRAM, 0, 0x10000);
 
@@ -544,10 +553,6 @@ void Reset()
     Wifi::Reset();
 
     AREngine::Reset();
-
-#ifdef JIT_ENABLED
-    ARMJIT::Reset();
-#endif
 }
 
 void Stop()
@@ -657,7 +662,7 @@ bool DoSavestate(Savestate* file)
 
     file->VarArray(MainRAM, 0x400000);
     file->VarArray(SharedWRAM, 0x8000);
-    file->VarArray(ARM7WRAM, 0x10000);
+    file->VarArray(ARM7WRAM, ARM7WRAMSize);
 
     file->VarArray(ExMemCnt, 2*sizeof(u16));
     file->VarArray(ROMSeed0, 2*8);
@@ -1061,43 +1066,40 @@ void MapSharedWRAM(u8 val)
     if (val == WRAMCnt)
         return;
 
+    ARMJIT_Memory::RemapSWRAM();
+
     WRAMCnt = val;
 
     switch (WRAMCnt & 0x3)
     {
     case 0:
-        SWRAM_ARM9 = &SharedWRAM[0];
-        SWRAM_ARM9Mask = 0x7FFF;
-        SWRAM_ARM7 = NULL;
-        SWRAM_ARM7Mask = 0;
+        SWRAM_ARM9.Mem = &SharedWRAM[0];
+        SWRAM_ARM9.Mask = 0x7FFF;
+        SWRAM_ARM7.Mem = NULL;
+        SWRAM_ARM7.Mask = 0;
         break;
 
     case 1:
-        SWRAM_ARM9 = &SharedWRAM[0x4000];
-        SWRAM_ARM9Mask = 0x3FFF;
-        SWRAM_ARM7 = &SharedWRAM[0];
-        SWRAM_ARM7Mask = 0x3FFF;
+        SWRAM_ARM9.Mem = &SharedWRAM[0x4000];
+        SWRAM_ARM9.Mask = 0x3FFF;
+        SWRAM_ARM7.Mem = &SharedWRAM[0];
+        SWRAM_ARM7.Mask = 0x3FFF;
         break;
 
     case 2:
-        SWRAM_ARM9 = &SharedWRAM[0];
-        SWRAM_ARM9Mask = 0x3FFF;
-        SWRAM_ARM7 = &SharedWRAM[0x4000];
-        SWRAM_ARM7Mask = 0x3FFF;
+        SWRAM_ARM9.Mem = &SharedWRAM[0];
+        SWRAM_ARM9.Mask = 0x3FFF;
+        SWRAM_ARM7.Mem = &SharedWRAM[0x4000];
+        SWRAM_ARM7.Mask = 0x3FFF;
         break;
 
     case 3:
-        SWRAM_ARM9 = NULL;
-        SWRAM_ARM9Mask = 0;
-        SWRAM_ARM7 = &SharedWRAM[0];
-        SWRAM_ARM7Mask = 0x7FFF;
+        SWRAM_ARM9.Mem = NULL;
+        SWRAM_ARM9.Mask = 0;
+        SWRAM_ARM7.Mem = &SharedWRAM[0];
+        SWRAM_ARM7.Mask = 0x7FFF;
         break;
     }
-
-#ifdef JIT_ENABLED
-    ARMJIT::UpdateMemoryStatus9(0x3000000, 0x3000000 + 0x1000000);
-    ARMJIT::UpdateMemoryStatus7(0x3000000, 0x3000000 + 0x1000000);
-#endif
 }
 
 
@@ -1691,12 +1693,12 @@ u8 ARM9Read8(u32 addr)
     switch (addr & 0xFF000000)
     {
     case 0x02000000:
-        return *(u8*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)];
+        return *(u8*)&MainRAM[addr & (MainRAMSize - 1)];
 
     case 0x03000000:
-        if (SWRAM_ARM9)
+        if (SWRAM_ARM9.Mem)
         {
-            return *(u8*)&SWRAM_ARM9[addr & SWRAM_ARM9Mask];
+            return *(u8*)&SWRAM_ARM9.Mem[addr & SWRAM_ARM9.Mask];
         }
         else
         {
@@ -1756,12 +1758,12 @@ u16 ARM9Read16(u32 addr)
     switch (addr & 0xFF000000)
     {
     case 0x02000000:
-        return *(u16*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)];
+        return *(u16*)&MainRAM[addr & (MainRAMSize - 1)];
 
     case 0x03000000:
-        if (SWRAM_ARM9)
+        if (SWRAM_ARM9.Mem)
         {
-            return *(u16*)&SWRAM_ARM9[addr & SWRAM_ARM9Mask];
+            return *(u16*)&SWRAM_ARM9.Mem[addr & SWRAM_ARM9.Mask];
         }
         else
         {
@@ -1821,12 +1823,12 @@ u32 ARM9Read32(u32 addr)
     switch (addr & 0xFF000000)
     {
     case 0x02000000:
-        return *(u32*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)];
+        return *(u32*)&MainRAM[addr & (MainRAMSize - 1)];
 
     case 0x03000000:
-        if (SWRAM_ARM9)
+        if (SWRAM_ARM9.Mem)
         {
-            return *(u32*)&SWRAM_ARM9[addr & SWRAM_ARM9Mask];
+            return *(u32*)&SWRAM_ARM9.Mem[addr & SWRAM_ARM9.Mask];
         }
         else
         {
@@ -1882,18 +1884,18 @@ void ARM9Write8(u32 addr, u8 val)
     {
     case 0x02000000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateMainRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<0, ARMJIT_Memory::memregion_MainRAM>(addr);
 #endif
-        *(u8*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)] = val;
+        *(u8*)&MainRAM[addr & (MainRAMSize - 1)] = val;
         return;
 
     case 0x03000000:
-        if (SWRAM_ARM9)
+        if (SWRAM_ARM9.Mem)
         {
 #ifdef JIT_ENABLED
-            ARMJIT::InvalidateSWRAM9IfNecessary(addr);
+            ARMJIT::CheckAndInvalidate<0, ARMJIT_Memory::memregion_SWRAM>(addr);
 #endif
-            *(u8*)&SWRAM_ARM9[addr & SWRAM_ARM9Mask] = val;
+            *(u8*)&SWRAM_ARM9.Mem[addr & SWRAM_ARM9.Mask] = val;
         }
         return;
 
@@ -1938,18 +1940,18 @@ void ARM9Write16(u32 addr, u16 val)
     {
     case 0x02000000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateMainRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<0, ARMJIT_Memory::memregion_MainRAM>(addr);
 #endif
-        *(u16*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)] = val;
+        *(u16*)&MainRAM[addr & (MainRAMSize - 1)] = val;
         return;
 
     case 0x03000000:
-        if (SWRAM_ARM9)
+        if (SWRAM_ARM9.Mem)
         {
 #ifdef JIT_ENABLED
-            ARMJIT::InvalidateSWRAM9IfNecessary(addr);
+            ARMJIT::CheckAndInvalidate<0, ARMJIT_Memory::memregion_SWRAM>(addr);
 #endif
-            *(u16*)&SWRAM_ARM9[addr & SWRAM_ARM9Mask] = val;
+            *(u16*)&SWRAM_ARM9.Mem[addr & SWRAM_ARM9.Mask] = val;
         }
         return;
 
@@ -1963,18 +1965,16 @@ void ARM9Write16(u32 addr, u16 val)
         return;
 
     case 0x06000000:
+#ifdef JIT_ENABLED
+        ARMJIT::CheckAndInvalidate<0, ARMJIT_Memory::memregion_VRAM>(addr);
+#endif
         switch (addr & 0x00E00000)
         {
         case 0x00000000: GPU::WriteVRAM_ABG<u16>(addr, val); return;
         case 0x00200000: GPU::WriteVRAM_BBG<u16>(addr, val); return;
         case 0x00400000: GPU::WriteVRAM_AOBJ<u16>(addr, val); return;
         case 0x00600000: GPU::WriteVRAM_BOBJ<u16>(addr, val); return;
-        default:
-#ifdef JIT_ENABLED
-            ARMJIT::InvalidateLCDCIfNecessary(addr);
-#endif
-            GPU::WriteVRAM_LCDC<u16>(addr, val);
-            return;
+        default: GPU::WriteVRAM_LCDC<u16>(addr, val); return;
         }
 
     case 0x07000000:
@@ -2015,18 +2015,18 @@ void ARM9Write32(u32 addr, u32 val)
     {
     case 0x02000000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateMainRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<0, ARMJIT_Memory::memregion_MainRAM>(addr);
 #endif
-        *(u32*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)] = val;
+        *(u32*)&MainRAM[addr & (MainRAMSize - 1)] = val;
         return ;
 
     case 0x03000000:
-        if (SWRAM_ARM9)
+        if (SWRAM_ARM9.Mem)
         {
 #ifdef JIT_ENABLED
-            ARMJIT::InvalidateSWRAM9IfNecessary(addr);
+            ARMJIT::CheckAndInvalidate<0, ARMJIT_Memory::memregion_SWRAM>(addr);
 #endif
-            *(u32*)&SWRAM_ARM9[addr & SWRAM_ARM9Mask] = val;
+            *(u32*)&SWRAM_ARM9.Mem[addr & SWRAM_ARM9.Mask] = val;
         }
         return;
 
@@ -2040,18 +2040,16 @@ void ARM9Write32(u32 addr, u32 val)
         return;
 
     case 0x06000000:
+#ifdef JIT_ENABLED
+        ARMJIT::CheckAndInvalidate<0, ARMJIT_Memory::memregion_VRAM>(addr);
+#endif
         switch (addr & 0x00E00000)
         {
         case 0x00000000: GPU::WriteVRAM_ABG<u32>(addr, val); return;
         case 0x00200000: GPU::WriteVRAM_BBG<u32>(addr, val); return;
         case 0x00400000: GPU::WriteVRAM_AOBJ<u32>(addr, val); return;
         case 0x00600000: GPU::WriteVRAM_BOBJ<u32>(addr, val); return;
-        default:
-#ifdef JIT_ENABLED
-            ARMJIT::InvalidateLCDCIfNecessary(addr);
-#endif
-            GPU::WriteVRAM_LCDC<u32>(addr, val);
-            return;
+        default: GPU::WriteVRAM_LCDC<u32>(addr, val); return;
         }
 
     case 0x07000000:
@@ -2093,14 +2091,14 @@ bool ARM9GetMemRegion(u32 addr, bool write, MemRegion* region)
     {
     case 0x02000000:
         region->Mem = MainRAM;
-        region->Mask = MAIN_RAM_SIZE-1;
+        region->Mask = MainRAMSize-1;
         return true;
 
     case 0x03000000:
-        if (SWRAM_ARM9)
+        if (SWRAM_ARM9.Mem)
         {
-            region->Mem = SWRAM_ARM9;
-            region->Mask = SWRAM_ARM9Mask;
+            region->Mem = SWRAM_ARM9.Mem;
+            region->Mask = SWRAM_ARM9.Mask;
             return true;
         }
         break;
@@ -2135,20 +2133,20 @@ u8 ARM7Read8(u32 addr)
     {
     case 0x02000000:
     case 0x02800000:
-        return *(u8*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)];
+        return *(u8*)&MainRAM[addr & (MainRAMSize - 1)];
 
     case 0x03000000:
-        if (SWRAM_ARM7)
+        if (SWRAM_ARM7.Mem)
         {
-            return *(u8*)&SWRAM_ARM7[addr & SWRAM_ARM7Mask];
+            return *(u8*)&SWRAM_ARM7.Mem[addr & SWRAM_ARM7.Mask];
         }
         else
         {
-            return *(u8*)&ARM7WRAM[addr & 0xFFFF];
+            return *(u8*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)];
         }
 
     case 0x03800000:
-        return *(u8*)&ARM7WRAM[addr & 0xFFFF];
+        return *(u8*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)];
 
     case 0x04000000:
         return ARM7IORead8(addr);
@@ -2195,20 +2193,20 @@ u16 ARM7Read16(u32 addr)
     {
     case 0x02000000:
     case 0x02800000:
-        return *(u16*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)];
+        return *(u16*)&MainRAM[addr & (MainRAMSize - 1)];
 
     case 0x03000000:
-        if (SWRAM_ARM7)
+        if (SWRAM_ARM7.Mem)
         {
-            return *(u16*)&SWRAM_ARM7[addr & SWRAM_ARM7Mask];
+            return *(u16*)&SWRAM_ARM7.Mem[addr & SWRAM_ARM7.Mask];
         }
         else
         {
-            return *(u16*)&ARM7WRAM[addr & 0xFFFF];
+            return *(u16*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)];
         }
 
     case 0x03800000:
-        return *(u16*)&ARM7WRAM[addr & 0xFFFF];
+        return *(u16*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)];
 
     case 0x04000000:
         return ARM7IORead16(addr);
@@ -2262,20 +2260,20 @@ u32 ARM7Read32(u32 addr)
     {
     case 0x02000000:
     case 0x02800000:
-        return *(u32*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)];
+        return *(u32*)&MainRAM[addr & (MainRAMSize - 1)];
 
     case 0x03000000:
-        if (SWRAM_ARM7)
+        if (SWRAM_ARM7.Mem)
         {
-            return *(u32*)&SWRAM_ARM7[addr & SWRAM_ARM7Mask];
+            return *(u32*)&SWRAM_ARM7.Mem[addr & SWRAM_ARM7.Mask];
         }
         else
         {
-            return *(u32*)&ARM7WRAM[addr & 0xFFFF];
+            return *(u32*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)];
         }
 
     case 0x03800000:
-        return *(u32*)&ARM7WRAM[addr & 0xFFFF];
+        return *(u32*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)];
 
     case 0x04000000:
         return ARM7IORead32(addr);
@@ -2320,34 +2318,34 @@ void ARM7Write8(u32 addr, u8 val)
     case 0x02000000:
     case 0x02800000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateMainRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_MainRAM>(addr);
 #endif
-        *(u8*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)] = val;
+        *(u8*)&MainRAM[addr & (MainRAMSize - 1)] = val;
         return;
 
     case 0x03000000:
-        if (SWRAM_ARM7)
+        if (SWRAM_ARM7.Mem)
         {
 #ifdef JIT_ENABLED
-            ARMJIT::InvalidateSWRAM7IfNecessary(addr);
+            ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_SWRAM>(addr);
 #endif
-            *(u8*)&SWRAM_ARM7[addr & SWRAM_ARM7Mask] = val;
+            *(u8*)&SWRAM_ARM7.Mem[addr & SWRAM_ARM7.Mask] = val;
             return;
         }
         else
         {
 #ifdef JIT_ENABLED
-            ARMJIT::InvalidateARM7WRAMIfNecessary(addr);
+            ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_WRAM7>(addr);
 #endif
-            *(u8*)&ARM7WRAM[addr & 0xFFFF] = val;
+            *(u8*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)] = val;
             return;
         }
 
     case 0x03800000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateARM7WRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_WRAM7>(addr);
 #endif
-        *(u8*)&ARM7WRAM[addr & 0xFFFF] = val;
+        *(u8*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)] = val;
         return;
 
     case 0x04000000:
@@ -2357,7 +2355,7 @@ void ARM7Write8(u32 addr, u8 val)
     case 0x06000000:
     case 0x06800000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateARM7WVRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_VWRAM>(addr);
 #endif
         GPU::WriteVRAM_ARM7<u8>(addr, val);
         return;
@@ -2394,34 +2392,34 @@ void ARM7Write16(u32 addr, u16 val)
     case 0x02000000:
     case 0x02800000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateMainRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_MainRAM>(addr);
 #endif
-        *(u16*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)] = val;
+        *(u16*)&MainRAM[addr & (MainRAMSize - 1)] = val;
         return;
 
     case 0x03000000:
-        if (SWRAM_ARM7)
+        if (SWRAM_ARM7.Mem)
         {
 #ifdef JIT_ENABLED
-            ARMJIT::InvalidateSWRAM7IfNecessary(addr);
+            ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_SWRAM>(addr);
 #endif
-            *(u16*)&SWRAM_ARM7[addr & SWRAM_ARM7Mask] = val;
+            *(u16*)&SWRAM_ARM7.Mem[addr & SWRAM_ARM7.Mask] = val;
             return;
         }
         else
         {
 #ifdef JIT_ENABLED
-            ARMJIT::InvalidateARM7WRAMIfNecessary(addr);
+            ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_WRAM7>(addr);
 #endif
-            *(u16*)&ARM7WRAM[addr & 0xFFFF] = val;
+            *(u16*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)] = val;
             return;
         }
 
     case 0x03800000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateARM7WRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_WRAM7>(addr);
 #endif
-        *(u16*)&ARM7WRAM[addr & 0xFFFF] = val;
+        *(u16*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)] = val;
         return;
 
     case 0x04000000:
@@ -2439,7 +2437,7 @@ void ARM7Write16(u32 addr, u16 val)
     case 0x06000000:
     case 0x06800000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateARM7WVRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_VWRAM>(addr);
 #endif
         GPU::WriteVRAM_ARM7<u16>(addr, val);
         return;
@@ -2478,34 +2476,34 @@ void ARM7Write32(u32 addr, u32 val)
     case 0x02000000:
     case 0x02800000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateMainRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_MainRAM>(addr);
 #endif
-        *(u32*)&MainRAM[addr & (MAIN_RAM_SIZE - 1)] = val;
+        *(u32*)&MainRAM[addr & (MainRAMSize - 1)] = val;
         return;
 
     case 0x03000000:
-        if (SWRAM_ARM7)
+        if (SWRAM_ARM7.Mem)
         {
 #ifdef JIT_ENABLED
-            ARMJIT::InvalidateSWRAM7IfNecessary(addr);
+            ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_SWRAM>(addr);
 #endif
-            *(u32*)&SWRAM_ARM7[addr & SWRAM_ARM7Mask] = val;
+            *(u32*)&SWRAM_ARM7.Mem[addr & SWRAM_ARM7.Mask] = val;
             return;
         }
         else
         {
 #ifdef JIT_ENABLED
-            ARMJIT::InvalidateARM7WRAMIfNecessary(addr);
+            ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_WRAM7>(addr);
 #endif
-            *(u32*)&ARM7WRAM[addr & 0xFFFF] = val;
+            *(u32*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)] = val;
             return;
         }
 
     case 0x03800000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateARM7WRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_WRAM7>(addr);
 #endif
-        *(u32*)&ARM7WRAM[addr & 0xFFFF] = val;
+        *(u32*)&ARM7WRAM[addr & (ARM7WRAMSize - 1)] = val;
         return;
 
     case 0x04000000:
@@ -2524,7 +2522,7 @@ void ARM7Write32(u32 addr, u32 val)
     case 0x06000000:
     case 0x06800000:
 #ifdef JIT_ENABLED
-        ARMJIT::InvalidateARM7WVRAMIfNecessary(addr);
+        ARMJIT::CheckAndInvalidate<1, ARMJIT_Memory::memregion_VWRAM>(addr);
 #endif
         GPU::WriteVRAM_ARM7<u32>(addr, val);
         return;
@@ -2564,7 +2562,7 @@ bool ARM7GetMemRegion(u32 addr, bool write, MemRegion* region)
     case 0x02000000:
     case 0x02800000:
         region->Mem = MainRAM;
-        region->Mask = MAIN_RAM_SIZE-1;
+        region->Mask = MainRAMSize-1;
         return true;
 
     case 0x03000000:
@@ -2573,17 +2571,17 @@ bool ARM7GetMemRegion(u32 addr, bool write, MemRegion* region)
         // then access all the WRAM as one contiguous block starting at 0x037F8000
         // this case needs a bit of a hack to cover
         // it's not really worth bothering anyway
-        if (!SWRAM_ARM7)
+        if (!SWRAM_ARM7.Mem)
         {
             region->Mem = ARM7WRAM;
-            region->Mask = 0xFFFF;
+            region->Mask = ARM7WRAMSize-1;
             return true;
         }
         break;
 
     case 0x03800000:
         region->Mem = ARM7WRAM;
-        region->Mask = 0xFFFF;
+        region->Mask = ARM7WRAMSize-1;
         return true;
     }
 
